@@ -125,6 +125,154 @@ def load_default_strategies():
         logging.error(f"Exception details: {str(e)}", exc_info=True)
         return pd.DataFrame()
     
+def calculate_annual_returns(df):
+    """
+    Calculate annual returns from the portfolio equity curve and return as key-value pairs.
+    
+    Parameters:
+    df (pd.DataFrame): DataFrame containing 'date' and 'Portfolio Value' columns
+    
+    Returns:
+    list: List of dictionaries with 'year' and 'return' keys
+    """
+    # Convert date column to datetime with European format (DD-MM-YYYY)
+    df['date'] = pd.to_datetime(df['date'], format='%d-%m-%Y')
+    
+    # Set date as index
+    df_indexed = df.set_index('date')
+    
+    # Get daily returns
+    daily_returns = df_indexed['Portfolio Value'].pct_change()
+    
+    # Group by year and calculate compound annual returns
+    annual_returns = (1 + daily_returns).groupby(daily_returns.index.year).prod() - 1
+    
+    # Convert to percentage and round to 2 decimal places
+    annual_returns = (annual_returns * 100).round(2)
+    
+    # Convert to list of dictionaries with year and return keys
+    result = [{'year': str(year), 'return': float(return_val)} 
+             for year, return_val in annual_returns.items()]
+    
+    # Sort by year
+    result.sort(key=lambda x: x['year'])
+    
+    return result
+
+def calculate_trailing_returns(df_sum):
+    """
+    Calculate trailing returns for specified periods:
+    - For periods >= 1 year: Uses CAGR (Compound Annual Growth Rate)
+    - For periods < 1 year: Uses absolute returns
+    
+    Args:
+        df_sum (pd.DataFrame): DataFrame with portfolio values and date index
+        
+    Returns:
+        dict: Dictionary containing trailing returns for each period
+    """
+    import logging
+    import pandas as pd
+    import numpy as np
+    
+    logging.info(f"Input DataFrame shape: {df_sum.shape}")
+    logging.info(f"Input DataFrame columns: {df_sum.columns}")
+    
+    # Ensure we're working with a DataFrame with datetime index
+    if 'date' in df_sum.columns:
+        logging.info("Converting 'date' column to index")
+        df = df_sum.set_index('date')
+    else:
+        df = df_sum.copy()
+        
+    logging.info(f"DataFrame index type: {type(df.index)}")
+    
+    # Convert index to datetime if it's not already
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            logging.info("Converting index to datetime")
+            df.index = pd.to_datetime(df.index, dayfirst=True, errors='coerce')
+            logging.info(f"Conversion successful. New index type: {type(df.index)}")
+        except Exception as e:
+            logging.error(f"Error converting dates to datetime: {e}")
+            raise
+    
+    # Drop rows with invalid dates and log the count
+    invalid_dates = df.index.isna().sum()
+    if invalid_dates > 0:
+        logging.warning(f"Found {invalid_dates} invalid dates in the index. Dropping these rows.")
+        df = df.dropna(axis=0, subset=[df.index.name] if df.index.name else None)
+    
+    # Verify portfolio_value column
+    if 'Portfolio Value' not in df.columns:
+        logging.error("'Portfolio Value' column not found. Available columns: " + ", ".join(df.columns))
+        return {}
+    
+    # Get date range info
+    latest_date = df.index.max()
+    earliest_date = df.index.min()
+    logging.info(f"Date range: {earliest_date} to {latest_date}")
+    
+    # Define periods and their corresponding days
+    period_days = {
+        '10d': 10,
+        '1w': 7,
+        '1m': 30,
+        '3m': 91,
+        '6m': 182,
+        '1y': 365,
+        '3y': 1095,
+        '5y': 1825
+    }
+    
+    trailing_returns = {}
+    
+    # Calculate returns for each period
+    for period, days in period_days.items():
+        try:
+            start_date = latest_date - pd.Timedelta(days=days)
+            
+            if start_date < earliest_date:
+                logging.info(f"Skipping {period} calculation - insufficient history")
+                trailing_returns[period] = None
+                continue
+            
+            # Find the closest available date
+            start_value_series = df['Portfolio Value'].loc[
+                (df.index >= start_date) & 
+                (df.index <= start_date + pd.Timedelta(days=1))
+            ]
+            
+            if start_value_series.empty:
+                logging.warning(f"No data found for {period} start date {start_date}")
+                trailing_returns[period] = None
+                continue
+            
+            start_value = start_value_series.iloc[0]
+            end_value = df['Portfolio Value'].iloc[-1]
+            
+            logging.debug(f"{period} - Start value: {start_value}, End value: {end_value}")
+            
+            # Calculate return based on period length
+            if period in ['1y', '3y', '5y']:
+                # Calculate CAGR for periods >= 1 year
+                years = days / 365.0
+                cagr = (((end_value / start_value) ** (1 / years)) - 1) * 100
+                trailing_returns[period] = round(cagr, 2)
+                logging.info(f"Successfully calculated {period} CAGR: {trailing_returns[period]}%")
+            else:
+                # Calculate absolute return for periods < 1 year
+                abs_return = ((end_value / start_value) - 1) * 100
+                trailing_returns[period] = round(abs_return, 2)
+                logging.info(f"Successfully calculated {period} absolute return: {trailing_returns[period]}%")
+                
+        except Exception as e:
+            logging.error(f"Error calculating {period} trailing return: {str(e)}")
+            trailing_returns[period] = None
+    
+    logging.info(f"Final trailing returns: {trailing_returns}")
+    return trailing_returns
+
 def process_single_portfolio(data, df):
    
     try:
@@ -161,7 +309,7 @@ def process_single_portfolio(data, df):
         freq = get_frequency_value(frequency)
         
         new_DF = required_df(df, start_date, end_date, selected_systems_names)
-        
+        print('new_Ddcfwerfr4F', new_DF)
         # Check if any valid data exists for the selected date range and systems
         if new_DF.empty:
             error_msg = "No data available for the selected systems in the specified date range."
@@ -250,7 +398,12 @@ def process_single_portfolio(data, df):
         logging.debug(f"Final analysis dataframe:\n{df_sum.head()}")
 
         try:
+            print('reigjtrejijhgpi4jp5jp', df_sum)
             analysis_result = show_analysis(df_sum)
+            analysis_result['trailing_returns'] = calculate_trailing_returns(df_sum)
+            annual_returns = calculate_annual_returns(df_sum)
+            analysis_result['annual_returns'] = annual_returns
+
             global global_equity_curve_data
             global_equity_curve_data = analysis_result.get('equity_curve_data', {})
             logging.info('show_analysis completed successfully')
@@ -275,10 +428,14 @@ def process_single_portfolio(data, df):
                 
 def calculate_portfolio_comparison(data, combined_strategies_df):
     try:
+        # Get the list of portfolios from the frontend request
         portfolios = data.get('portfolios', [])
         logging.info(f"Portfolios received for comparison: {portfolios}")
+
+        # Initialize an empty list to store results
         results = []
 
+        # Check if portfolios are provided
         if not portfolios:
             error_msg = "No portfolios found in the request."
             logging.error(error_msg)
@@ -290,54 +447,64 @@ def calculate_portfolio_comparison(data, combined_strategies_df):
             logging.error(error_msg)
             return [{"error": error_msg}]
 
-        # Create a copy to avoid modifying the original
+        # Prepare the DataFrame with proper date index
         df = combined_strategies_df.copy()
-
-        # Handle date index conversion
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df = df.dropna(subset=['date'])
             df.set_index('date', inplace=True)
-        elif not isinstance(df.index, pd.datetimeIndex):
+        else:
             df.index = pd.to_datetime(df.index, errors='coerce')
-            df = df[df.index.notna()]  # Remove rows with NaT in index
+            df = df[df.index.notna()]  # Remove rows with invalid dates
 
-        if df.empty:
-            error_msg = "No valid dates found in the provided data."
-            logging.error(error_msg)
-            return [{"error": error_msg}]
-
+        # Ensure continuous date range for processing
         min_date = df.index.min()
         max_date = df.index.max()
-
         if pd.isnull(min_date) or pd.isnull(max_date):
             error_msg = "The date range contains invalid dates."
             logging.error(error_msg)
             return [{"error": error_msg}]
 
-        # Ensure continuous date range
-        full_date_range = pd.date_range(start=min_date, end=max_date, freq='D')
-        print('lenghthhhh',len(df))
-        # df = df.reindex(full_date_range).ffill()
-        df = df.loc[min_date:max_date].ffill()
-        print('lenghthhhh2',len(df))
-        
-        
-        logging.info(f"date column types after parsing: {df.index.dtype}")
+        df = df.loc[min_date:max_date].ffill()  # Fill forward for missing dates
 
+        # Process each portfolio
         for idx, portfolio in enumerate(portfolios):
-            logging.info(f"Processing portfolio {idx + 1}/{len(portfolios)}")
-            portfolio_result = process_single_portfolio(portfolio, df)
+            logging.info(f"Processing portfolio {idx + 1}/{len(portfolios)}: {portfolio.get('name')}")
             
+            # Retrieve the benchmark name for the portfolio
+            benchmark_name = portfolio.get('benchmark')
+            if not benchmark_name:
+                error_msg = f"Benchmark not specified for portfolio: {portfolio.get('name', 'Unnamed Portfolio')}"
+                logging.error(error_msg)
+                results.append({"error": error_msg, "portfolio_index": idx + 1})
+                continue
+
+            logging.info(f"Benchmark for portfolio '{portfolio.get('name')}': {benchmark_name}")
+
+            # Get benchmark data using the `required_df` function
+            benchmark_data = required_df(df, min_date, max_date, [benchmark_name])
+            if benchmark_data.empty:
+                error_msg = f"No data found for benchmark '{benchmark_name}' in the specified date range."
+                logging.error(error_msg)
+                results.append({"error": error_msg, "portfolio_index": idx + 1})
+                continue
+
+            # Process the portfolio
+            portfolio_result = process_single_portfolio(portfolio, df)
             if 'error' in portfolio_result:
                 results.append({
                     'portfolio_index': idx + 1,
+                    'portfolio_name': portfolio.get('name', f'Portfolio {idx + 1}'),
                     'error': portfolio_result['error'],
-                    'traceback': portfolio_result.get('traceback', '')
+                    'traceback': portfolio_result.get('traceback', ''),
                 })
             else:
+                # Add the benchmark comparison result
+                portfolio_result['result']['benchmark_data'] = benchmark_data.to_dict(orient='records')
                 results.append({
                     'portfolio_index': idx + 1,
+                    'portfolio_name': portfolio.get('name', f'Portfolio {idx + 1}'),
+                    'benchmark_name': benchmark_name,
                     'result': portfolio_result['result'],
                 })
 
@@ -347,7 +514,70 @@ def calculate_portfolio_comparison(data, combined_strategies_df):
         logging.error(f"Error in calculate_portfolio_comparison: {str(e)}")
         logging.error(traceback.format_exc())
         return [{"error": str(e), "traceback": traceback.format_exc()}]
+
+def calculate_annual_returns_with_balance(df_sum):
+    print('calculate_annual_returns_with_balance', df_sum)
+    """
+    Calculate annual returns with balance for each year.
     
+    Args:
+        df_sum (pd.DataFrame): DataFrame with portfolio values and date index
+        
+    Returns:
+        dict: Dictionary containing yearly returns and balances
+    """
+    # Ensure we're working with a DataFrame with datetime index
+    if 'date' in df_sum.columns:
+        df = df_sum.set_index('date')
+    else:
+        df = df_sum.copy()
+    
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    
+    # Create empty dictionary to store results
+    annual_metrics = {}
+    
+    try:
+        # Get unique years in the data
+        years = df.index.year.unique()
+        
+        for year in years:
+            year_data = df[df.index.year == year]
+            
+            # Get first and last portfolio value for the year
+            start_value = year_data['Portfolio Value'].iloc[0]
+            end_value = year_data['Portfolio Value'].iloc[-1]
+            
+            # Calculate return percentage
+            year_return = ((end_value / start_value) - 1) * 100
+            
+            # Store both return percentage and end balance
+            annual_metrics[str(year)] = {
+                'return_percentage': round(year_return, 2),
+                'end_balance': end_value,
+                'start_balance': round(start_value, 2),
+                'start_date': year_data.index[0].strftime('%Y-%m-%d'),
+                'end_date': year_data.index[-1].strftime('%Y-%m-%d')
+            }
+            
+            # Calculate additional metrics
+            highest_balance = year_data['Portfolio Value'].max()
+            lowest_balance = year_data['Portfolio Value'].min()
+            
+            annual_metrics[str(year)].update({
+                'highest_balance': round(highest_balance, 2),
+                'lowest_balance': round(lowest_balance, 2),
+                'drawdown': round(((highest_balance - lowest_balance) / highest_balance) * 100, 2)
+            })
+    
+    except Exception as e:
+        logging.error(f"Error calculating annual returns: {str(e)}")
+        logging.error(traceback.format_exc())
+        return None
+
+    return annual_metrics
+
 def get_frequency_value(frequency):
     """Converts frequency input into numeric value for rebalancing calculations."""
     if frequency == 'daily':
@@ -396,7 +626,6 @@ def input_cash(invest_amount, cash_percent): #function to take cash as input
 
 def required_df(df, start_date, end_date, systems):
     print(df.info())
-    print('dfcdfwerfe4w31',df)
     cols = list(df.columns)
     cols = cols[1:]
     df1 = df[systems]
@@ -408,12 +637,10 @@ def required_df(df, start_date, end_date, systems):
         print(df1.info())
         print('df1',df1)
         df1 = df1.loc[start_date:end_date]
-    print('djklvnhefn df1', len(df1))
 
     start_index = df1.first_valid_index()
     end_index = df1.last_valid_index()
     df2 = df1.loc[start_index:end_index]
-    print('lenght ofemnjvenklpm df2', len(df2))
     return df2
 
 def statsbox(df1): #function to print the stats
@@ -798,6 +1025,7 @@ def show_analysis(df_sum_new):
         df_sum_new_dt['date'] = pd.to_datetime(df_sum_new_dt['date'], format='%d-%m-%Y', errors='coerce')
 
         additional_metrics = calculate_additional_metrics(df_sum_new_dt)
+        additional_metrics['annual_metrics'] = calculate_annual_returns_with_balance(df_sum_new_dt)
 
         # ===================== Build Response =====================
         response = {
@@ -830,7 +1058,6 @@ def show_analysis(df_sum_new):
         logging.error(traceback.format_exc())
         raise
 
-
 def calculate_additional_metrics(df_sum, risk_free_rate=0.0, benchmark_returns=None):
     """
     Calculate additional risk/return metrics on a DataFrame that has
@@ -843,36 +1070,26 @@ def calculate_additional_metrics(df_sum, risk_free_rate=0.0, benchmark_returns=N
     :return: A dict containing the calculated metrics.
     """
 
-    # ----- 1. Ensure 'date' is a proper datetime type -----
+    # Ensure 'date' is datetime
     if not pd.api.types.is_datetime64_any_dtype(df_sum['date']):
         df_sum['date'] = pd.to_datetime(df_sum['date'], format='%d-%m-%Y', errors='coerce')
 
-    # Sort by date just in case
     df_sum = df_sum.sort_values('date').reset_index(drop=True)
 
-    # ----- 2. Calculate Daily Returns -----
+    # Daily Returns
     df_sum['Daily Return'] = df_sum['Portfolio Value'].pct_change()
-    
-    # Drop the first row if it’s NaN after pct_change
     df_sum = df_sum.dropna(subset=['Daily Return'])
 
-    # ----- 3. Annualized Return (CAGR) -----
-    # You might already calculate CAGR via calculate_xirr, but here is a standard approach:
+    # Annualized Return (CAGR)
     total_period_return = df_sum['Portfolio Value'].iloc[-1] / df_sum['Portfolio Value'].iloc[0] - 1
     days = (df_sum['date'].iloc[-1] - df_sum['date'].iloc[0]).days
-    # Avoid division by zero
-    if days > 0:
-        cagr = (1 + total_period_return) ** (365.0 / days) - 1
-    else:
-        cagr = np.nan
+    cagr = (1 + total_period_return) ** (365.0 / days) - 1 if days > 0 else np.nan
 
-    # ----- 4. Standard Deviation (annualized) -----
-    # Assuming daily returns and ~252 trading days/year
+    # Standard Deviation (annualized)
     daily_std = df_sum['Daily Return'].std()
     ann_std = daily_std * np.sqrt(252)
 
-    # ----- 5. Best Year / Worst Year -----
-    # Group by year, compute total return for each year:
+    # Best Year / Worst Year Analysis
     df_sum['Year'] = df_sum['date'].dt.year
     yearly_returns = df_sum.groupby('Year')['Daily Return'].apply(lambda x: (1 + x).prod() - 1)
 
@@ -885,92 +1102,77 @@ def calculate_additional_metrics(df_sum, risk_free_rate=0.0, benchmark_returns=N
         best_year = worst_year = None
         best_year_return = worst_year_return = np.nan
 
-    # ----- 6. Maximum Drawdown -----
-    # If you haven’t already computed it, we can do a quick calculation:
+    # Drawdown Analysis
     rolling_max = df_sum['Portfolio Value'].cummax()
     drawdown = (df_sum['Portfolio Value'] - rolling_max) / rolling_max
-    max_drawdown = drawdown.min()  # negative value
+    max_drawdown = drawdown.min()  # Minimum drawdown
+    df_sum['Drawdown'] = drawdown
 
-    # ----- 7. Sharpe Ratio -----
-    # Annualized Sharpe = (mean daily excess return / stdev daily excess return) * sqrt(252)
-    # If risk_free_rate is an annual rate, convert it to daily for correct calculation.
-    # E.g., daily_rf = (1 + risk_free_rate)**(1/252) - 1
-    daily_rf = 0.0
-    if risk_free_rate > 0:
-        daily_rf = (1 + risk_free_rate) ** (1/252) - 1
+    # Average drawdown and average days in drawdown
+    dd_groups = (drawdown != 0).astype(int).diff().ne(0).cumsum()
+    dd_stats = df_sum.groupby(dd_groups).apply(
+        lambda group: {'avg_dd': group['Drawdown'].mean(), 'days_in_dd': len(group)}
+    ).values
 
-    df_sum['Excess Daily Return'] = df_sum['Daily Return'] - daily_rf
-    mean_excess_return = df_sum['Excess Daily Return'].mean()
-    std_excess_return = df_sum['Excess Daily Return'].std()
-    if std_excess_return != 0:
-        sharpe_ratio = (mean_excess_return / std_excess_return) * np.sqrt(252)
-    else:
-        sharpe_ratio = np.nan
+    avg_dd = np.mean([stat['avg_dd'] for stat in dd_stats if not np.isnan(stat['avg_dd'])])
+    avg_days_in_dd = np.mean([stat['days_in_dd'] for stat in dd_stats if stat['days_in_dd'] > 0])
 
-    # ----- 8. Sortino Ratio -----
-    # Sortino uses only downside (negative) deviation:
-    df_sum['Downside Return'] = np.where(df_sum['Daily Return'] < 0, df_sum['Daily Return'] - daily_rf, 0)
-    std_downside = df_sum['Downside Return'].std()
-    if std_downside != 0:
-        sortino_ratio = (mean_excess_return / std_downside) * np.sqrt(252)
-    else:
-        sortino_ratio = np.nan
-
-    # ----- 9. Additional Risk & Return Metrics (with placeholders) -----
-    # For Beta/Alpha, typically you need a benchmark daily return series.
+    # Benchmark Correlation
     if benchmark_returns is not None:
-        # Align benchmark returns with df_sum by date
         merged = pd.merge(
             df_sum[['date', 'Daily Return']],
-            benchmark_returns.rename('benchmark'),
+            benchmark_returns.rename('Benchmark Return'),
             on='date',
             how='inner'
         )
-        cov = np.cov(merged['Daily Return'], merged['benchmark'])[0, 1]
-        var_bench = np.var(merged['benchmark'])
-        if var_bench != 0:
-            beta = cov / var_bench
-        else:
-            beta = np.nan
+        benchmark_corr = merged[['Daily Return', 'Benchmark Return']].corr().iloc[0, 1]
 
-        # Alpha = difference between actual return and expected return from CAPM
-        # For simplicity, we measure daily alpha => then annualize
-        # daily_alpha = daily_portfolio - [rf + beta * (daily_benchmark - rf)]
-        # Summation and adjust
-        daily_alpha_series = merged['Daily Return'] - (daily_rf + beta * (merged['benchmark'] - daily_rf))
+        # Beta
+        cov = np.cov(merged['Daily Return'], merged['Benchmark Return'])[0, 1]
+        var_bench = np.var(merged['Benchmark Return'])
+        beta = cov / var_bench if var_bench != 0 else np.nan
+
+        # Alpha (annualized)
+        daily_alpha_series = merged['Daily Return'] - (risk_free_rate + beta * (merged['Benchmark Return'] - risk_free_rate))
         daily_alpha = daily_alpha_series.mean()
-        # annualize
-        alpha = daily_alpha * 252
+        alpha = daily_alpha * 252  # Annualized Alpha
     else:
+        benchmark_corr = np.nan
         beta = 1.0
         alpha = 0.0
 
-    # Treynor Ratio (annualized) = (Return - risk_free) / Beta
-    # Here we use cagr as "Return"
-    if beta != 0:
-        treynor_ratio = (cagr - risk_free_rate) / beta
-    else:
-        treynor_ratio = np.nan
+    # Sharpe Ratio
+    daily_rf = (1 + risk_free_rate) ** (1 / 252) - 1 if risk_free_rate > 0 else 0.0
+    df_sum['Excess Daily Return'] = df_sum['Daily Return'] - daily_rf
+    sharpe_ratio = (df_sum['Excess Daily Return'].mean() / df_sum['Excess Daily Return'].std()) * np.sqrt(252) \
+        if df_sum['Excess Daily Return'].std() > 0 else np.nan
 
-    # Calmar Ratio = CAGR / |Max Drawdown| (assuming max_drawdown is negative)
+    # Sortino Ratio
+    df_sum['Downside Return'] = np.where(df_sum['Daily Return'] < daily_rf, df_sum['Daily Return'] - daily_rf, 0)
+    sortino_ratio = (df_sum['Excess Daily Return'].mean() / df_sum['Downside Return'].std()) * np.sqrt(252) \
+        if df_sum['Downside Return'].std() > 0 else np.nan
+
+    # Treynor Ratio
+    treynor_ratio = (cagr - risk_free_rate) / beta if beta != 0 else np.nan
+
+    # Calmar Ratio
     calmar_ratio = cagr / abs(max_drawdown) if max_drawdown != 0 else np.nan
 
-    # ----- 10. Organize Metrics in a Dictionary -----
     metrics = {
-        # Already in your sample
         'Annualized Return (CAGR)': cagr,
         'Standard Deviation (annualized)': ann_std,
         'Best Year': best_year,
         'Best Year Return': best_year_return,
         'Worst Year': worst_year,
         'Worst Year Return': worst_year_return,
-        'Maximum Drawdown': max_drawdown,     # negative value
-        'Sharpe Ratio': sharpe_ratio,
-        'Sortino Ratio': sortino_ratio,
-
-        # Additional Risk & Return
+        'Maximum Drawdown': max_drawdown,
+        'Average Drawdown': avg_dd,
+        'Average Days in Drawdown': avg_days_in_dd,
+        'Benchmark Correlation': benchmark_corr,
         'Beta': beta,
         'Alpha (annualized)': alpha,
+        'Sharpe Ratio': sharpe_ratio,
+        'Sortino Ratio': sortino_ratio,
         'Treynor Ratio (%)': treynor_ratio * 100 if not np.isnan(treynor_ratio) else np.nan,
         'Calmar Ratio': calmar_ratio,
     }
