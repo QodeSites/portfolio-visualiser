@@ -17,11 +17,11 @@ def check_session():
         "strategies_count": len(session.get('user_strategies', []))
     })
 
+# app/routes/upload.py
 @upload_bp.route('/upload_strategy', methods=['POST'])
 def upload_strategy():
     try:
-        # Add session debugging at the start
-        logging.info("Initial session state: %s", dict(session))
+        logging.info("Handling file upload request")
         
         if 'file' not in request.files:
             logging.error("No file part in the request.")
@@ -37,28 +37,19 @@ def upload_strategy():
             logging.error("Invalid file type. Only CSV files are allowed.")
             return jsonify({"error": "Invalid file type. Only CSV files are allowed."}), 400
             
+        # Create uploads directory if not exists
         upload_dir = os.path.join(current_app.root_path, 'uploads')
         os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save the file to the uploads directory
         file_path = os.path.join(upload_dir, filename)
         file.save(file_path)
         logging.info(f"File saved at {file_path}")
         
+        # Attempt to read the CSV to extract column information
         try:
             df = pd.read_csv(file_path)
-            data_list = df.to_dict(orient='records')
-            
-            # Debug log before setting session
-            logging.info("About to store in session: %d records", len(data_list))
-            
-            # Explicitly modify session
-            session['user_strategies'] = data_list
-            session.modified = True
-            
-            # Debug log after setting session
-            logging.info("Session after storage: %s", dict(session))
-            
             columns = [col for col in df.columns.tolist() if col.lower() != 'date']
-            
         except Exception as e:
             logging.error(f"Failed to read CSV file: {str(e)}")
             return jsonify({"error": "Failed to read CSV file."}), 400
@@ -70,8 +61,7 @@ def upload_strategy():
         return jsonify({
             "message": "File uploaded successfully.",
             "columns": columns,
-            "rows_processed": len(data_list),
-            "session_status": "user_strategies" in session
+            "rows_processed": len(df)
         }), 200
         
     except Exception as e:

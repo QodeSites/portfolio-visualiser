@@ -1,7 +1,7 @@
 # app/services/analysis.py
 import os
 import traceback
-from flask import Flask, request, jsonify, make_response, url_for
+from flask import Flask, request, jsonify, make_response, url_for, current_app
 import pandas as pd
 import numpy as np
 import logging
@@ -54,9 +54,38 @@ def standardize_csv_data(df_csv):
     
     return df_csv
 
+# app/services/analysis.py
+
+def standardize_strategy_names(df):
+    """
+    Standardizes strategy names by removing spaces, handling _1 suffixes properly.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame with strategy columns
+    
+    Returns:
+        pd.DataFrame: DataFrame with standardized column names
+    """
+    renamed_columns = {}
+    for col in df.columns:
+        if col.lower() == 'date':
+            continue
+            
+        # Remove extra spaces and standardize
+        new_name = col.strip()
+        # Preserve _1 suffix if it exists
+        if '_1' in new_name:
+            base_name = new_name.replace('_1', '')
+            new_name = f"{base_name.strip()}_1"
+        
+        renamed_columns[col] = new_name
+    
+    return df.rename(columns=renamed_columns)
+
 def load_default_strategies():
     """
-    Fetches and combines strategies from all sources, properly handling historical data.
+    Fetches and combines strategies from the database, default CSV, and user-uploaded CSV files,
+    properly handling historical data and strategy name standardization.
     """
     try:
         # 1. Load database data
@@ -73,44 +102,67 @@ def load_default_strategies():
         conn.close()
         
         logging.info(f"Fetched {len(df_db)} rows from PostgreSQL")
-        logging.info(f"DB date range: {df_db['date'].min()} to {df_db['date'].max()}")
         
-        # 2. Load CSV data
-        csv_path = os.path.join(Config.CSV_DIR, 'All weather portfolio.csv')
-        df_csv = pd.read_csv(csv_path)
-        logging.info(f"Loaded {len(df_csv)} rows from CSV")
-        
+        # 2. Load default CSV data
+        default_csv_path = os.path.join(Config.CSV_DIR, 'All weather portfolio.csv')
+        df_csv = pd.read_csv(default_csv_path)
+        logging.info(f"Loaded {len(df_csv)} rows from default CSV")
+
         # 3. Standardize both datasets
         df_db_standardized = standardize_db_data(df_db)
         df_csv_standardized = standardize_csv_data(df_csv)
         
-        # 4. Ensure dates are in datetime format for proper merging
+        # Ensure dates are in datetime format
         df_db_standardized['date'] = pd.to_datetime(df_db_standardized['date'])
         df_csv_standardized['date'] = pd.to_datetime(df_csv_standardized['date'])
         
-        # 5. Get the list of columns from both datasets
-        db_columns = set(df_db_standardized.columns)
-        csv_columns = set(df_csv_standardized.columns)
-        
-        logging.info(f"DB columns: {db_columns}")
-        logging.info(f"CSV columns: {csv_columns}")
-        
-        # 6. Fill missing columns with NaN in both dataframes
-        all_columns = db_columns.union(csv_columns)
-        for col in all_columns:
-            if col not in db_columns:
-                df_db_standardized[col] = np.nan
-            if col not in csv_columns:
-                df_csv_standardized[col] = np.nan
-        
-        # 7. Combine the data
+        # 4. Create initial combined DataFrame
         combined_df = pd.concat([df_db_standardized, df_csv_standardized])
-        
-        # 8. For overlapping dates, prefer the more recent source
         combined_df = combined_df.sort_values('date')
         combined_df = combined_df.groupby('date').last().reset_index()
         
-        # 9. Sort by date for final output
+        # 5. Process uploaded CSV files
+        upload_dir = os.path.join(current_app.root_path, 'uploads')
+        if os.path.exists(upload_dir):
+            uploaded_files = [f for f in os.listdir(upload_dir) if f.lower().endswith('.csv')]
+            
+            for filename in uploaded_files:
+                file_path = os.path.join(upload_dir, filename)
+                try:
+                    df_uploaded = pd.read_csv(file_path)
+                    logging.info(f"Processing uploaded CSV: {filename}")
+                    logging.info(f"Original columns in {filename}: {df_uploaded.columns.tolist()}")
+                    
+                    # Standardize column names
+                    df_uploaded = standardize_strategy_names(df_uploaded)
+                    logging.info(f"Standardized columns in {filename}: {df_uploaded.columns.tolist()}")
+                    
+                    # Convert date column
+                    date_col = [col for col in df_uploaded.columns if col.lower() == 'date'][0]
+                    df_uploaded[date_col] = pd.to_datetime(df_uploaded[date_col], errors='coerce')
+                    df_uploaded = df_uploaded.rename(columns={date_col: 'date'})
+                    
+                    # Drop rows with NaT dates
+                    df_uploaded = df_uploaded.dropna(subset=['date'])
+                    
+                    # Get non-date columns
+                    strategy_columns = [col for col in df_uploaded.columns if col.lower() != 'date']
+                    
+                    # Merge with combined_df
+                    combined_df = pd.merge(
+                        combined_df,
+                        df_uploaded[['date'] + strategy_columns],
+                        on='date',
+                        how='outer'
+                    )
+                    
+                    logging.info(f"Successfully merged {filename}")
+                    logging.info(f"Current columns after merge: {combined_df.columns.tolist()}")
+                    
+                except Exception as e:
+                    logging.error(f"Error processing uploaded CSV {filename}: {str(e)}", exc_info=True)
+        
+        # 6. Final sorting and cleaning
         combined_df = combined_df.sort_values('date')
         
         # Log final results
@@ -119,12 +171,12 @@ def load_default_strategies():
         logging.info(f"Final columns: {combined_df.columns.tolist()}")
         
         return combined_df
-        
+
     except Exception as e:
-        logging.error(f"Error loading default strategies: {str(e)}")
-        logging.error(f"Exception details: {str(e)}", exc_info=True)
+        logging.error(f"Error loading strategies: {str(e)}", exc_info=True)
+        logging.error(traceback.format_exc())
         return pd.DataFrame()
-    
+
 def calculate_annual_returns(df):
     """
     Calculate annual returns from the portfolio equity curve and return as key-value pairs.
@@ -473,21 +525,21 @@ def calculate_portfolio_comparison(data, combined_strategies_df):
             
             # Retrieve the benchmark name for the portfolio
             benchmark_name = portfolio.get('benchmark')
-            if not benchmark_name:
-                error_msg = f"Benchmark not specified for portfolio: {portfolio.get('name', 'Unnamed Portfolio')}"
-                logging.error(error_msg)
-                results.append({"error": error_msg, "portfolio_index": idx + 1})
-                continue
+            # if not benchmark_name:
+            #     error_msg = f"Benchmark not specified for portfolio: {portfolio.get('name', 'Unnamed Portfolio')}"
+            #     logging.error(error_msg)
+            #     results.append({"error": error_msg, "portfolio_index": idx + 1})
+            #     continue
 
             logging.info(f"Benchmark for portfolio '{portfolio.get('name')}': {benchmark_name}")
 
             # Get benchmark data using the `required_df` function
-            benchmark_data = required_df(df, min_date, max_date, [benchmark_name])
-            if benchmark_data.empty:
-                error_msg = f"No data found for benchmark '{benchmark_name}' in the specified date range."
-                logging.error(error_msg)
-                results.append({"error": error_msg, "portfolio_index": idx + 1})
-                continue
+            # benchmark_data = required_df(df, min_date, max_date, [benchmark_name])
+            # if benchmark_data.empty:
+            #     error_msg = f"No data found for benchmark '{benchmark_name}' in the specified date range."
+            #     logging.error(error_msg)
+            #     results.append({"error": error_msg, "portfolio_index": idx + 1})
+            #     continue
 
             # Process the portfolio
             portfolio_result = process_single_portfolio(portfolio, df)
@@ -500,10 +552,12 @@ def calculate_portfolio_comparison(data, combined_strategies_df):
                 })
             else:
                 # Add the benchmark comparison result
-                portfolio_result['result']['benchmark_data'] = benchmark_data.to_dict(orient='records')
+                # portfolio_result['result']['benchmark_data'] = benchmark_data.to_dict(orient='records')
                 results.append({
                     'portfolio_index': idx + 1,
                     'portfolio_name': portfolio.get('name', f'Portfolio {idx + 1}'),
+                    'selected_systems': portfolio['selected_systems'],
+                
                     'benchmark_name': benchmark_name,
                     'result': portfolio_result['result'],
                 })
